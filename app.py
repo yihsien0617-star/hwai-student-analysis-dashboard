@@ -1,9 +1,10 @@
 """
 🎓 招生資料分析儀表板
-版本: 1.3.0
+版本: 1.3.1
 - 餵校 → 生源學校
 - 入學管道新增生源學校交叉分析
 - 新增「系所分析」：以系為單位的完整剖析
+- 多班合併：資管一甲+資管一乙 → 資管（自動辨識）
 """
 
 import streamlit as st
@@ -12,7 +13,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from io import BytesIO
-import math
+import re
 
 # ════════════════════════════════════════════════════
 # 全域設定
@@ -43,6 +44,31 @@ COLOR_REGION = {
 
 CHART_TEMPLATE = "plotly_white"
 CHART_FONT = dict(family="Microsoft JhengHei, Arial, sans-serif", size=13)
+
+
+# ════════════════════════════════════════════════════
+# 班級名稱 → 系所名稱 合併
+# ════════════════════════════════════════════════════
+
+def extract_department(class_name: str) -> str:
+    """
+    將班級名稱去除年級＋班別後綴，合併為系所。
+    例：
+      資管一甲 → 資管
+      電機二乙 → 電機
+      護理三   → 護理
+      企管四丙 → 企管
+      資工甲   → 資工
+      日四技資管一甲 → 日四技資管
+      夜四技電機二A → 夜四技電機
+    策略：從尾部移除 [一二三四五1-5]?[甲乙丙丁戊A-Ea-e]? 的組合
+    """
+    s = str(class_name).strip()
+    # 移除尾部的年級+班別，支援中文數字/阿拉伯數字 + 甲乙丙丁/ABC
+    s = re.sub(r'[一二三四五六七1-7]?[甲乙丙丁戊A-Ea-e]?$', '', s)
+    # 再移除尾部可能剩餘的獨立年級數字
+    s = re.sub(r'[一二三四五六七1-7]$', '', s)
+    return s.strip() if s.strip() else str(class_name).strip()
 
 
 # ════════════════════════════════════════════════════
@@ -97,6 +123,11 @@ def clean_data(df):
         out["入學學年"] = pd.to_numeric(out["入學學年"], errors="coerce")
         out = out.dropna(subset=["入學學年"])
         out["入學學年"] = out["入學學年"].astype(int)
+
+    # === 新增：產生「系所」欄位 ===
+    if "班級名稱" in out.columns:
+        out["系所"] = out["班級名稱"].apply(extract_department)
+
     before = len(out)
     out = out.drop_duplicates()
     removed = before - len(out)
@@ -108,7 +139,7 @@ def clean_data(df):
 def filter_data(df, departments=None, years=None):
     out = df.copy()
     if departments:
-        out = out[out["班級名稱"].isin(departments)]
+        out = out[out["系所"].isin(departments)]
     if years:
         out = out[(out["入學學年"] >= years[0]) & (out["入學學年"] <= years[1])]
     return out
@@ -308,7 +339,7 @@ def source_school_insights(df):
 
 
 # ════════════════════════════════════════════════════
-# 分析三：入學管道（含生源學校交叉分析）
+# 分析三：入學管道
 # ════════════════════════════════════════════════════
 
 def channel_pie(df, year=None):
@@ -444,10 +475,11 @@ def channel_insights(df):
         ins.append("🟢 **集中度風險：低** — 管道多元")
     ins.append(f"📊 目前使用 **{df['入學方式'].nunique()}** 種管道")
     summary = channel_school_summary(df)
-    max_hhi_row = summary.loc[summary["HHI集中度"].idxmax()]
-    ins.append(f"🏫 學校來源最集中的管道：**{max_hhi_row['入學管道']}**"
-               f"（HHI={max_hhi_row['HHI集中度']:.4f}，"
-               f"前5大校佔 {max_hhi_row['前5大校佔比']}）")
+    if not summary.empty:
+        max_hhi_row = summary.loc[summary["HHI集中度"].idxmax()]
+        ins.append(f"🏫 學校來源最集中的管道：**{max_hhi_row['入學管道']}**"
+                   f"（HHI={max_hhi_row['HHI集中度']:.4f}，"
+                   f"前5大校佔 {max_hhi_row['前5大校佔比']}）")
     return ins
 
 
@@ -550,8 +582,8 @@ def trend_enrollment_chart(df):
 
 
 def trend_dept_chart(df):
-    data = df.groupby(["入學學年", "班級名稱"]).size().reset_index(name="人數")
-    fig = px.line(data, x="入學學年", y="人數", color="班級名稱",
+    data = df.groupby(["入學學年", "系所"]).size().reset_index(name="人數")
+    fig = px.line(data, x="入學學年", y="人數", color="系所",
                   title="📈 各系所招生趨勢", markers=True)
     fig.update_layout(template=CHART_TEMPLATE, font=CHART_FONT,
                       xaxis=dict(dtick=1))
@@ -650,23 +682,24 @@ def trend_insights(df):
 
 
 # ════════════════════════════════════════════════════
-# 分析六（新）：系所分析
+# 分析六：系所分析（使用合併後「系所」欄位）
 # ════════════════════════════════════════════════════
 
 def dept_overview_table(df):
-    """各系所 KPI 總覽"""
-    years = sorted(df["入學學年"].unique())
     rows = []
-    for dept in sorted(df["班級名稱"].unique()):
-        dd = df[df["班級名稱"] == dept]
+    for dept in sorted(df["系所"].unique()):
+        dd = df[df["系所"] == dept]
         n = len(dd)
+        n_class = dd["班級名稱"].nunique()
         n_school = dd["畢業學校"].nunique()
         n_city = dd["縣市"].nunique()
         n_channel = dd["入學方式"].nunique()
         top_region = dd["區域"].value_counts()
         top_school = dd["畢業學校"].value_counts()
         top_channel = dd["入學方式"].value_counts()
-        # 成長率（最後兩年）
+        # 班級明細
+        class_list = "、".join(sorted(dd["班級名稱"].unique()))
+        # 成長率
         yr_counts = dd.groupby("入學學年").size()
         growth = ""
         if len(yr_counts) >= 2:
@@ -674,11 +707,13 @@ def dept_overview_table(df):
             prev = yr_counts.iloc[-2]
             g = (last - prev) / max(prev, 1) * 100
             growth = f"{g:+.1f}%"
-        # 學校集中度
+        # HHI
         shares = dd["畢業學校"].value_counts(normalize=True)
         hhi = round((shares ** 2).sum(), 4)
         rows.append({
             "系所": dept,
+            "包含班級": class_list,
+            "班級數": n_class,
             "學生數": n,
             "涵蓋學年": f"{dd['入學學年'].min()}~{dd['入學學年'].max()}",
             "來源學校數": n_school,
@@ -694,7 +729,6 @@ def dept_overview_table(df):
 
 
 def dept_compare_bar(df, metric="學生數"):
-    """各系所指標比較"""
     overview = dept_overview_table(df)
     if metric not in overview.columns:
         metric = "學生數"
@@ -708,9 +742,8 @@ def dept_compare_bar(df, metric="學生數"):
 
 
 def dept_trend_lines(df):
-    """各系所逐年招生折線"""
-    data = df.groupby(["入學學年", "班級名稱"]).size().reset_index(name="人數")
-    fig = px.line(data, x="入學學年", y="人數", color="班級名稱",
+    data = df.groupby(["入學學年", "系所"]).size().reset_index(name="人數")
+    fig = px.line(data, x="入學學年", y="人數", color="系所",
                   title="📈 各系所逐年招生趨勢", markers=True)
     fig.update_layout(template=CHART_TEMPLATE, font=CHART_FONT,
                       xaxis=dict(dtick=1))
@@ -718,7 +751,7 @@ def dept_trend_lines(df):
 
 
 def dept_geo_pie(df, dept):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     counts = dd["區域"].value_counts().reset_index()
     counts.columns = ["區域", "人數"]
     fig = px.pie(counts, values="人數", names="區域",
@@ -730,7 +763,7 @@ def dept_geo_pie(df, dept):
 
 
 def dept_county_bar(df, dept, top_n=10):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     counts = dd["縣市"].value_counts().head(top_n).reset_index()
     counts.columns = ["縣市", "人數"]
     counts = counts.sort_values("人數", ascending=True)
@@ -742,7 +775,7 @@ def dept_county_bar(df, dept, top_n=10):
 
 
 def dept_school_bar(df, dept, top_n=10):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     counts = dd["畢業學校"].value_counts().head(top_n).reset_index()
     counts.columns = ["畢業學校", "人數"]
     counts = counts.sort_values("人數", ascending=True)
@@ -755,7 +788,7 @@ def dept_school_bar(df, dept, top_n=10):
 
 
 def dept_school_heatmap(df, dept, top_n=10):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     tops = dd["畢業學校"].value_counts().head(top_n).index.tolist()
     sub = dd[dd["畢業學校"].isin(tops)]
     if sub.empty:
@@ -780,7 +813,7 @@ def dept_school_heatmap(df, dept, top_n=10):
 
 
 def dept_channel_pie(df, dept):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     counts = dd["入學方式"].value_counts().reset_index()
     counts.columns = ["入學方式", "人數"]
     fig = px.pie(counts, values="人數", names="入學方式",
@@ -791,7 +824,7 @@ def dept_channel_pie(df, dept):
 
 
 def dept_channel_trend(df, dept):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     data = dd.groupby(["入學學年", "入學方式"]).size().reset_index(name="人數")
     fig = px.bar(data, x="入學學年", y="人數", color="入學方式",
                  title=f"📈【{dept}】入學管道逐年趨勢",
@@ -802,8 +835,7 @@ def dept_channel_trend(df, dept):
 
 
 def dept_channel_school(df, dept, top_n=8):
-    """系所的管道 × 學校 熱力圖"""
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     tops = dd["畢業學校"].value_counts().head(top_n).index.tolist()
     sub = dd[dd["畢業學校"].isin(tops)]
     if sub.empty:
@@ -824,7 +856,7 @@ def dept_channel_school(df, dept, top_n=8):
 
 
 def dept_edu_pie(df, dept):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     counts = dd["入學前學歷"].value_counts().reset_index()
     counts.columns = ["入學前學歷", "人數"]
     fig = px.pie(counts, values="人數", names="入學前學歷",
@@ -835,7 +867,7 @@ def dept_edu_pie(df, dept):
 
 
 def dept_major_bar(df, dept, top_n=10):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     counts = dd["畢業科系"].value_counts().head(top_n).reset_index()
     counts.columns = ["畢業科系", "人數"]
     counts = counts.sort_values("人數", ascending=True)
@@ -847,7 +879,7 @@ def dept_major_bar(df, dept, top_n=10):
 
 
 def dept_enrollment_chart(df, dept):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     t = dd.groupby("入學學年").size().reset_index(name="學生數")
     if len(t) >= 2:
         t["成長率(%)"] = (t["學生數"].pct_change() * 100).round(1)
@@ -874,12 +906,29 @@ def dept_enrollment_chart(df, dept):
     return fig
 
 
+def dept_class_breakdown(df, dept):
+    """顯示同一系所下各班級的人數明細"""
+    dd = df[df["系所"] == dept]
+    data = dd.groupby(["入學學年", "班級名稱"]).size().reset_index(name="人數")
+    fig = px.bar(data, x="入學學年", y="人數", color="班級名稱",
+                 title=f"📊【{dept}】各班級逐年人數",
+                 text="人數", barmode="group")
+    fig.update_layout(template=CHART_TEMPLATE, font=CHART_FONT,
+                      xaxis=dict(dtick=1))
+    return fig
+
+
 def dept_insights(df, dept):
-    dd = df[df["班級名稱"] == dept]
+    dd = df[df["系所"] == dept]
     ins = []
     n = len(dd)
     total = len(df)
-    ins.append(f"📊 **{dept}** 共 **{n}** 人，佔全校 **{n / max(total, 1) * 100:.1f}%**")
+    n_class = dd["班級名稱"].nunique()
+    class_list = "、".join(sorted(dd["班級名稱"].unique()))
+
+    if n_class > 1:
+        ins.append(f"📋 **{dept}** 包含 **{n_class}** 個班級：{class_list}")
+    ins.append(f"📊 共 **{n}** 人，佔全校 **{n / max(total, 1) * 100:.1f}%**")
 
     # 區域
     top_r = dd["區域"].value_counts()
@@ -888,7 +937,8 @@ def dept_insights(df, dept):
     # 學校
     n_school = dd["畢業學校"].nunique()
     top_s = dd["畢業學校"].value_counts()
-    ins.append(f"🏫 來自 **{n_school}** 所學校，第一大生源校：**{top_s.index[0]}** ({top_s.iloc[0]}人)")
+    ins.append(f"🏫 來自 **{n_school}** 所學校，"
+               f"第一大生源校：**{top_s.index[0]}** ({top_s.iloc[0]}人)")
 
     # 管道
     top_c = dd["入學方式"].value_counts()
@@ -905,7 +955,7 @@ def dept_insights(df, dept):
         else:
             ins.append(f"➡️ 最新學年變化 **{g:+.1f}%**，大致持平")
 
-    # 集中度警示
+    # 集中度
     top5_pct = top_s.head(5).sum() / n * 100
     if top5_pct > 50:
         ins.append(f"⚠️ 前 5 大生源校佔 **{top5_pct:.1f}%**，集中度偏高")
@@ -952,20 +1002,21 @@ with st.sidebar:
     st.subheader("📋 必要欄位")
     st.markdown("""
     - `入學學年` (111, 112, 113…)
-    - `班級名稱` (系所)
+    - `班級名稱` (如：資管一甲)
     - `學號`
     - `縣市`
     - `入學前學歷`
     - `畢業學校`
     - `畢業科系`
     - `入學方式`
-    > 💡 `區域` 欄位可自動產生
+    > 💡 系統自動將「資管一甲+資管一乙」合併為「資管」系
     """)
 
 st.markdown("<h1 style='text-align:center; color:#1E3A5F;'>"
             "🎓 招生資料分析儀表板</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center; color:#666;'>"
-            "上傳 Excel → 自動產生六大分析報告</p>", unsafe_allow_html=True)
+            "上傳 Excel → 自動產生六大分析報告（多班自動合併為系所）</p>",
+            unsafe_allow_html=True)
 
 if uploaded is None:
     st.info("👈 請從左側上傳 Excel 檔案以開始分析")
@@ -979,7 +1030,13 @@ if uploaded is None:
         | 3 | 🎯 入學管道 | 各管道成效、生源學校交叉分析 |
         | 4 | 🎓 學生背景 | 學歷/科系分布 |
         | 5 | 📈 跨年趨勢 | KPI 與多元性追蹤 |
-        | 6 | 🏛️ 系所分析 | 以個別系所為單位的完整剖析 |
+        | 6 | 🏛️ 系所分析 | 以系為單位完整剖析（多班自動合併） |
+
+        ### 🔄 多班合併邏輯
+        班級名稱尾部的年級＋班別會自動去除：
+        - `資管一甲` + `資管一乙` → **資管**
+        - `電機二A` + `電機二B` → **電機**
+        - `護理三` → **護理**
         """)
     st.stop()
 
@@ -1005,12 +1062,20 @@ if not chk["valid"]:
 
 df = clean_data(raw_df)
 
-# 篩選器
+# === 顯示合併對照 ===
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("🔄 班級→系所 對照")
+    mapping = (df[["班級名稱", "系所"]].drop_duplicates()
+               .sort_values("系所").reset_index(drop=True))
+    st.dataframe(mapping, use_container_width=True, hide_index=True, height=200)
+
+# 篩選器（改用「系所」）
 st.markdown("---")
 c1, c2 = st.columns(2)
 with c1:
-    depts = sorted(df["班級名稱"].unique().tolist())
-    sel_depts = st.multiselect("🏛️ 選擇系所（空白=全部）", depts)
+    dept_list = sorted(df["系所"].unique().tolist())
+    sel_depts = st.multiselect("🏛️ 選擇系所（空白=全部）", dept_list)
 with c2:
     ymin, ymax = int(df["入學學年"].min()), int(df["入學學年"].max())
     if ymin == ymax:
@@ -1030,7 +1095,7 @@ st.markdown("---")
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("👥 學生數", len(fdf))
 k2.metric("📅 學年數", fdf["入學學年"].nunique())
-k3.metric("🏛️ 系所數", fdf["班級名稱"].nunique())
+k3.metric("🏛️ 系所數", fdf["系所"].nunique())
 k4.metric("🏙️ 來源縣市", fdf["縣市"].nunique())
 k5.metric("🏫 生源學校", fdf["畢業學校"].nunique())
 
@@ -1088,7 +1153,7 @@ with tab2:
             else:
                 st.info("此類別無資料")
 
-# ── Tab 3：入學管道（含生源學校交叉分析）──
+# ── Tab 3：入學管道 ──
 with tab3:
     st.header("🎯 入學管道成效分析")
     show_insights(channel_insights(fdf))
@@ -1119,7 +1184,6 @@ with tab3:
                      use_container_width=True)
 
     st.markdown("---")
-
     st.subheader("🏫 各管道生源學校分析")
 
     ch_summary = channel_school_summary(fdf)
@@ -1127,13 +1191,10 @@ with tab3:
     st.dataframe(ch_summary, use_container_width=True, hide_index=True)
     download_excel(ch_summary, "管道生源學校摘要.xlsx", "下載管道學校摘要")
 
-    st.markdown("")
-
     ch_tn = st.slider("熱力圖 Top N 學校", 5, 20, 10, key="ch_school_tn")
     st.plotly_chart(channel_school_heatmap(fdf, ch_tn), use_container_width=True)
 
     st.markdown("---")
-
     st.markdown("**▎單一管道深入分析**")
     channels = sorted(fdf["入學方式"].unique().tolist())
     sel_channel = st.selectbox("選擇入學管道", channels, key="ch_sel")
@@ -1196,10 +1257,21 @@ with tab5:
     st.dataframe(summary, use_container_width=True)
     download_excel(summary, "綜合趨勢.xlsx", "下載趨勢數據")
 
-# ── Tab 6（新）：系所分析 ──
+# ── Tab 6：系所分析（合併後） ──
 with tab6:
     st.header("🏛️ 系所分析")
-    st.markdown("> 以個別系所為單位，深入剖析生源地理、生源學校、入學管道、學生背景與趨勢")
+    st.markdown("> 多班自動合併為系所，以系為單位進行完整剖析")
+
+    # 顯示合併說明
+    n_class = df["班級名稱"].nunique()
+    n_dept = df["系所"].nunique()
+    if n_class != n_dept:
+        st.success(f"✅ 已將 **{n_class}** 個班級合併為 **{n_dept}** 個系所")
+        with st.expander("🔄 查看班級→系所對照表"):
+            mapping_display = (fdf[["班級名稱", "系所"]].drop_duplicates()
+                               .sort_values(["系所", "班級名稱"])
+                               .reset_index(drop=True))
+            st.dataframe(mapping_display, use_container_width=True, hide_index=True)
 
     # ---- 6A：系所總覽 ----
     st.subheader("📊 各系所 KPI 總覽")
@@ -1214,7 +1286,8 @@ with tab6:
     compare_cols = st.columns(2)
     with compare_cols[0]:
         compare_metric = st.selectbox("比較指標",
-                                      ["學生數", "來源學校數", "來源縣市數", "管道數", "學校HHI"],
+                                      ["學生數", "來源學校數", "來源縣市數",
+                                       "管道數", "學校HHI"],
                                       key="dept_metric")
         st.plotly_chart(dept_compare_bar(fdf, compare_metric),
                         use_container_width=True)
@@ -1225,22 +1298,37 @@ with tab6:
 
     # ---- 6C：單一系所深入分析 ----
     st.subheader("🔍 單一系所深入分析")
-    all_depts = sorted(fdf["班級名稱"].unique().tolist())
+    all_depts = sorted(fdf["系所"].unique().tolist())
     sel_dept = st.selectbox("選擇系所", all_depts, key="dept_select")
 
     # 該系 KPI
-    dd = fdf[fdf["班級名稱"] == sel_dept]
-    dk1, dk2, dk3, dk4, dk5 = st.columns(5)
+    dd = fdf[fdf["系所"] == sel_dept]
+    dk1, dk2, dk3, dk4, dk5, dk6 = st.columns(6)
     dk1.metric("👥 學生數", len(dd))
-    dk2.metric("🏫 生源學校", dd["畢業學校"].nunique())
-    dk3.metric("🏙️ 來源縣市", dd["縣市"].nunique())
-    dk4.metric("🎯 管道數", dd["入學方式"].nunique())
-    dk5.metric("📅 學年數", dd["入學學年"].nunique())
+    dk2.metric("📚 班級數", dd["班級名稱"].nunique())
+    dk3.metric("🏫 生源學校", dd["畢業學校"].nunique())
+    dk4.metric("🏙️ 來源縣市", dd["縣市"].nunique())
+    dk5.metric("🎯 管道數", dd["入學方式"].nunique())
+    dk6.metric("📅 學年數", dd["入學學年"].nunique())
 
     # 關鍵發現
-    show_insights(dept_insights(fdf, sel_dept), title=f"💡 【{sel_dept}】關鍵發現")
+    show_insights(dept_insights(fdf, sel_dept),
+                  title=f"💡 【{sel_dept}】關鍵發現")
 
     st.markdown("---")
+
+    # ---- 班級明細（多班時顯示）----
+    if dd["班級名稱"].nunique() > 1:
+        st.markdown(f"#### 📚 【{sel_dept}】各班級明細")
+        st.plotly_chart(dept_class_breakdown(fdf, sel_dept),
+                        use_container_width=True)
+        class_summary = (dd.groupby(["入學學年", "班級名稱"]).size()
+                         .reset_index(name="人數")
+                         .pivot_table(index="班級名稱", columns="入學學年",
+                                      values="人數", fill_value=0,
+                                      margins=True, margins_name="合計"))
+        st.dataframe(class_summary, use_container_width=True)
+        st.markdown("---")
 
     # ---- 6C-1：生源地理 ----
     st.markdown(f"#### 📍 【{sel_dept}】生源地理")
@@ -1248,7 +1336,8 @@ with tab6:
     with dg1:
         st.plotly_chart(dept_geo_pie(fdf, sel_dept), use_container_width=True)
     with dg2:
-        st.plotly_chart(dept_county_bar(fdf, sel_dept, 10), use_container_width=True)
+        st.plotly_chart(dept_county_bar(fdf, sel_dept, 10),
+                        use_container_width=True)
 
     st.markdown("---")
 
@@ -1269,9 +1358,11 @@ with tab6:
     st.markdown(f"#### 🎯 【{sel_dept}】入學管道")
     dc1, dc2 = st.columns(2)
     with dc1:
-        st.plotly_chart(dept_channel_pie(fdf, sel_dept), use_container_width=True)
+        st.plotly_chart(dept_channel_pie(fdf, sel_dept),
+                        use_container_width=True)
     with dc2:
-        st.plotly_chart(dept_channel_trend(fdf, sel_dept), use_container_width=True)
+        st.plotly_chart(dept_channel_trend(fdf, sel_dept),
+                        use_container_width=True)
 
     st.plotly_chart(dept_channel_school(fdf, sel_dept, min(dept_tn, 8)),
                     use_container_width=True)
@@ -1284,13 +1375,15 @@ with tab6:
     with dp1:
         st.plotly_chart(dept_edu_pie(fdf, sel_dept), use_container_width=True)
     with dp2:
-        st.plotly_chart(dept_major_bar(fdf, sel_dept, 10), use_container_width=True)
+        st.plotly_chart(dept_major_bar(fdf, sel_dept, 10),
+                        use_container_width=True)
 
     st.markdown("---")
 
     # ---- 6C-5：招生趨勢 ----
     st.markdown(f"#### 📈 【{sel_dept}】招生趨勢")
-    st.plotly_chart(dept_enrollment_chart(fdf, sel_dept), use_container_width=True)
+    st.plotly_chart(dept_enrollment_chart(fdf, sel_dept),
+                    use_container_width=True)
 
     # ---- 6C-6：該系原始資料 ----
     with st.expander(f"📋 【{sel_dept}】原始資料（{len(dd)} 筆）"):
