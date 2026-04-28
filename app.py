@@ -1,5 +1,5 @@
 """
-🎓 招生資料分析儀表板
+🎓 中華醫事科技大學 招生資料分析儀表板
 版本: 1.3.2
 - 深色/淺色模式自適應字體
 - 新增：生源學校 × 本校系所 交叉分析
@@ -1172,7 +1172,7 @@ st.set_page_config(page_title="招生分析儀表板", page_icon="🎓",
 inject_custom_css()
 
 with st.sidebar:
-    st.title("🎓 招生分析儀表板")
+    st.title("🎓中華醫事科技大學 招生分析儀表板")
     st.markdown("---")
     st.subheader("📂 上傳資料")
     uploaded = st.file_uploader("上傳新生資料 Excel", type=["xlsx", "xls"],
@@ -1191,7 +1191,7 @@ with st.sidebar:
     """)
 
 st.markdown("<h1 style='text-align:center; color:#1E3A5F;'>"
-            "🎓 招生資料分析儀表板</h1>", unsafe_allow_html=True)
+            "🎓 中華醫事科技大學 招生資料分析儀表板</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center; color:#666;'>"
             "上傳 Excel → 自動產生六大分析報告（多班自動合併為系所）</p>",
             unsafe_allow_html=True)
